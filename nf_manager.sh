@@ -179,10 +179,10 @@ while true; do
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
-    echo -e "  ${GREEN}1.${RESET} ➕ 添加新的转发规则"
-    echo -e "  ${RED}2.${RESET} 🗑️  删除现有转发规则"
-    echo -e "  ${YELLOW}3.${RESET} 🔄 强制重启并重载规则"
-    echo -e "  ${CYAN}0.${RESET} 🚪 退出面板"
+    echo -e "  ${GREEN}1.${RESET} 添加新的转发规则"
+    echo -e "  ${RED}2.${RESET} 删除现有转发规则"
+    echo -e "  ${YELLOW}3.${RESET} 强制重启并重载规则"
+    echo -e "  ${CYAN}0.${RESET} 退出面板"
     echo -e "${CYAN}=================================================${RESET}"
     read -p "请输入数字 [0-3]: " choice
 
