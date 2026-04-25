@@ -23,7 +23,7 @@
 请使用 `root` 用户登录你的 Linux 服务器，并直接复制执行以下命令：
 
 ```bash
-bash <(curl -sL [https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh](https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh))
+bash <(curl -sL https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh)
 ```
 
 > **系统支持**：Ubuntu / Debian / CentOS / AlmaLinux (自动识别并安装环境)
