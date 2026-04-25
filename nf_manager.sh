@@ -3,13 +3,12 @@
 # =========================================================
 # 项目名称：NF-Manager 纯内核极速转发面板
 # 仓库地址：https://github.com/starshine369/nftables-keep
-# 特性：函数预载优化 / 自动同步快捷键 / 纯内核态转发
+# 特性：函数预载优化 / 仅管理规则 / 不修改内核参数 / 纯内核态转发
 # =========================================================
 
 # --- [1. 路径与变量定义] ---
 CONFIG_FILE="/etc/nf_manager.list"
-SYSCTL_FILE="/etc/sysctl.d/99-nftables-forward.conf"
-VERSION="v1.2.1"
+VERSION="v1.2.2"
 
 # 颜色定义
 RED="\033[31m"
@@ -134,24 +133,12 @@ init_env() {
 
     # 安装组件
     if ! command -v nft >/dev/null 2>&1; then
+        echo -e "${YELLOW}=> 正在安装 nftables...${RESET}"
         apt-get update && apt-get install -y nftables
-    fi
-
-    # 转发参数保活
-    if [ ! -f "$SYSCTL_FILE" ]; then
-        modprobe nf_conntrack 2>/dev/null
-        cat > "$SYSCTL_FILE" << EOF
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-net.netfilter.nf_conntrack_max = 65536
-net.ipv4.tcp_keepalive_time = 600
-EOF
-        sysctl --system >/dev/null 2>&1
     fi
 }
 
 # --- [4. 主程序入口] ---
-# 只有执行到这里，菜单才会弹出
 init_env
 
 while true; do
