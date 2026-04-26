@@ -211,7 +211,7 @@ init_env
 while true; do
     clear
     echo -e "${CYAN}=================================================${RESET}"
-    echo -e "${CYAN}      NF-Manager 专线安全网关面板 v3.0          ${RESET}"
+    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v3.0          ${RESET}"
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
