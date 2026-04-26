@@ -215,12 +215,12 @@ while true; do
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
-    echo -e "  ${GREEN}1.${RESET} ➕ 添加转发规则"
-    echo -e "  ${RED}2.${RESET} ➖ 删除转发规则"
-    echo -e "  ${YELLOW}3.${RESET} 🔄 手动热重载转发"
-    echo -e "  ${CYAN}4.${RESET} 📝 编辑 CIDR 防御白名单 (自动重载主防火墙)"
-    echo -e "  ${CYAN}5.${RESET} ⏳ 查看限时放行名单 (临时测试 IP)"
-    echo -e "  ${CYAN}0.${RESET} 🚪 退出"
+    echo -e "  ${GREEN}1.${RESET} 添加转发规则"
+    echo -e "  ${RED}2.${RESET} 删除转发规则"
+    echo -e "  ${YELLOW}3.${RESET} 手动热重载转发"
+    echo -e "  ${CYAN}4.${RESET} 编辑 CIDR 防御白名单 (自动重载主防火墙)"
+    echo -e "  ${CYAN}5.${RESET} 查看限时放行名单 (临时测试 IP)"
+    echo -e "  ${CYAN}0.${RESET} 退出"
     echo -e "${CYAN}=================================================${RESET}"
     read -p "请输入指令 [0-5]: " choice
     case $choice in
