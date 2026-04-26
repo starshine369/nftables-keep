@@ -25,7 +25,7 @@ RESET="\033[0m"
 # --- [2. 核心功能函数] ---
 
 list_rules() {
-    echo -e "\n${CYAN}--- 🚀 当前正在运行的转发规则 ---${RESET}"
+    echo -e "\n${CYAN}--- 当前正在运行的转发规则 ---${RESET}"
     if [ ! -s "$CONFIG_FILE" ]; then
         echo -e "${YELLOW}目前没有任何转发规则。${RESET}"
     else
@@ -211,7 +211,7 @@ init_env
 while true; do
     clear
     echo -e "${CYAN}=================================================${RESET}"
-    echo -e "${CYAN}    🛡️ NF-Manager 专线安全网关面板 v3.0          ${RESET}"
+    echo -e "${CYAN}      NF-Manager 专线安全网关面板 v3.0          ${RESET}"
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
