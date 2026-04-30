@@ -2,18 +2,26 @@
 
 # =========================================================
 # 项目名称：NF-Manager 纯内核极速转发与安全面板
-# 版本：v3.0 (终极防线版)
+# 版本：v4.2 (网络调优版 - 增加 MTU/MSS 动态管理)
 # 特性：
-# 1. 独立 NAT 转发模块，热加载无缝切换
-# 2. 集成 IP 白名单一键编辑与防断网语法预检
-# 3. 动态限时访客 (Temp IPs) 实时状态监控
+# 1. 独立 NAT 转发，不再需要手动放行 input 端口
+# 2. MSS 钳制模块化：支持自定义参数与一键开关
+# 3. 动态配置 SSH 端口，绝对防御下保证 SSH 不断连
+# 4. 白名单物理开关，核弹级 prerouting_filter 拦截
 # =========================================================
 
 # --- [1. 路径定义] ---
 DIR_PATH="/etc/nf_manager"
 CONFIG_FILE="${DIR_PATH}/forward.list"
 RULES_FILE="${DIR_PATH}/rules.nft"
-WHITELIST_FILE="/etc/my_allow_ips.nft"
+WHITELIST_DEF="/etc/my_allow_ips.nft"
+ACTION_FILE="${DIR_PATH}/whitelist_action.nft"
+STATUS_FILE="${DIR_PATH}/whitelist.status"
+# 新增 MSS 调优路径
+MSS_FILE="${DIR_PATH}/mss.nft"
+MSS_STATUS_FILE="${DIR_PATH}/mss.status"
+MSS_VALUE_FILE="${DIR_PATH}/mss.value"
+
 MAIN_CONF="/etc/nftables.conf"
 
 RED="\033[31m"
@@ -25,7 +33,7 @@ RESET="\033[0m"
 # --- [2. 核心功能函数] ---
 
 list_rules() {
-    echo -e "\n${CYAN}--- 当前正在运行的转发规则 ---${RESET}"
+    echo -e "\n${CYAN}--- 🚀 当前正在运行的转发规则 ---${RESET}"
     if [ ! -s "$CONFIG_FILE" ]; then
         echo -e "${YELLOW}目前没有任何转发规则。${RESET}"
     else
@@ -74,7 +82,7 @@ EOF
     echo "    }" >> "$RULES_FILE"
     echo "}" >> "$RULES_FILE"
 
-    nft -f "$RULES_FILE"
+    nft -f "$MAIN_CONF" >/dev/null 2>&1
     echo -e "${GREEN}✅ 转发规则已热加载至内核独立区域！${RESET}"
 }
 
@@ -109,103 +117,194 @@ delete_rule() {
     sleep 2
 }
 
-# --- [新增] 白名单管理模块 ---
 edit_whitelist() {
-    # 1. 检查并生成默认模板
-    if [ ! -f "$WHITELIST_FILE" ]; then
-        echo -e "${YELLOW}未检测到白名单文件，正在生成标准模板...${RESET}"
-        cat > "$WHITELIST_FILE" << EOF
-# 专线前置拦截白名单
-# 注意：每行末尾必须加逗号，最后一行可不加。
-
-define ALLOWED_CIDRS = {
-    # 示例: 湖北电信网段
-    113.56.0.0/15,
-    
-    # 示例: 山东特定IP
-    1.2.3.4/32
-}
-EOF
-    fi
-
-    # 2. 调用 nano 编辑器 (简单易用)
-    nano "$WHITELIST_FILE"
-
-    # 3. 核心安全机制：语法预检 (Dry Run)
+    nano "$WHITELIST_DEF"
     echo -e "\n${CYAN}正在对配置文件进行内核级语法检查...${RESET}"
     if nft -c -f "$MAIN_CONF" >/dev/null 2>&1; then
-        # 语法正确，正式应用
         nft -f "$MAIN_CONF"
-        echo -e "${GREEN}✅ 语法校验通过！防火墙白名单已成功重载并生效。${RESET}"
+        echo -e "${GREEN}✅ 语法校验通过！白名单已成功重载并生效。${RESET}"
     else
-        # 语法错误，拒绝加载，保护机器不断网
-        echo -e "${RED}❌ 致命错误：您刚才修改的文件存在语法错误（可能漏了逗号或大括号）。${RESET}"
-        echo -e "${RED}⚠️ 为了防止机器断网，已拒绝重载规则。请重新编辑修复！${RESET}"
+        echo -e "${RED}❌ 致命错误：语法错误（可能漏了逗号或大括号）。${RESET}"
+        echo -e "${RED}⚠️ 为了防止断网，已拒绝重载。请重新编辑修复！${RESET}"
     fi
     echo "按任意键返回主菜单..."
     read -n 1 -s
 }
 
-# --- [新增] 限时访客查看模块 ---
-view_temp_ips() {
-    echo -e "\n${CYAN}--- ⏳ 当前处于临时放行的访客名单 ---${RESET}"
-    
-    # 尝试从内核提取 temp_ips 集合信息
-    local temp_info=$(nft list set ip filter temp_ips 2>/dev/null)
-    
-    if [ -z "$temp_info" ]; then
-         echo -e "${YELLOW}主配置文件中尚未配置 temp_ips 集合，或者集合不存在。${RESET}"
-    elif echo "$temp_info" | grep -q "elements = { }"; then
-         echo -e "${GREEN}当前没有任何临时放行的 IP。城墙紧闭！${RESET}"
+toggle_whitelist() {
+    local status=$(cat "$STATUS_FILE" 2>/dev/null)
+    if [ "$status" == "ON" ]; then
+        echo "" > "$ACTION_FILE"
+        echo "OFF" > "$STATUS_FILE"
+        nft -f "$MAIN_CONF"
+        echo -e "${GREEN}🔓 防御已撤除：所有 IP 均可访问转发端口！${RESET}"
     else
-         # 提取并格式化输出 elements 里面的内容
-         echo -e "${YELLOW}警告：以下 IP 拥有临时通行证！${RESET}"
-         echo "$temp_info" | grep "expires" | sed 's/elements = { //g' | sed 's/ }//g' | tr ',' '\n' | while read -r line; do
-             if [ -n "$line" ]; then
-                 echo -e " 🔓 $line"
-             fi
-         done
+        cat > "$ACTION_FILE" << EOF
+        # 核心防御：只允许白名单和临时访客，其他抛弃
+        ip saddr \$ALLOWED_CIDRS accept
+        ip saddr @temp_ips accept
+        drop
+EOF
+        echo "ON" > "$STATUS_FILE"
+        nft -f "$MAIN_CONF"
+        echo -e "${RED}🛡️ 铁幕降临：非白名单 IP 已被全面阻断！${RESET}"
     fi
-    echo "------------------------------------------------"
-    echo "按任意键返回主菜单..."
-    read -n 1 -s
+    sleep 2
 }
 
-# --- [3. 模块化环境初始化] ---
+# --- [新增] MSS 钳制管理 ---
+manage_mss() {
+    local status=$(cat "$MSS_STATUS_FILE" 2>/dev/null)
+    local current_val=$(cat "$MSS_VALUE_FILE" 2>/dev/null)
+    [ -z "$current_val" ] && current_val="1338"
 
-# --- [3. 模块化环境初始化] ---
+    echo -e "\n${CYAN}--- 🛠️ MTU/MSS 钳制调优 ---${RESET}"
+    echo -e "当前状态: $([ "$status" == "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")"
+    echo -e "当前参数: ${YELLOW}set maxseg size $current_val${RESET}"
+    echo -e "--------------------------"
+    echo -e "1. 切换 开启/关闭"
+    echo -e "2. 修改 MSS 数值"
+    echo -e "0. 返回主菜单"
+    read -p "请选择: " mss_choice
 
+    case $mss_choice in
+        1)
+            if [ "$status" == "ON" ]; then
+                echo "" > "$MSS_FILE"
+                echo "OFF" > "$MSS_STATUS_FILE"
+            else
+                echo "tcp flags syn tcp option maxseg size set $current_val" > "$MSS_FILE"
+                echo "ON" > "$MSS_STATUS_FILE"
+            fi
+            nft -f "$MAIN_CONF"
+            echo -e "${GREEN}设置已生效！${RESET}"
+            sleep 1
+            ;;
+        2)
+            read -p "请输入新的 MSS 数值 (推荐 1300-1400): " new_val
+            if [[ "$new_val" =~ ^[0-9]+$ ]]; then
+                echo "$new_val" > "$MSS_VALUE_FILE"
+                if [ "$status" == "ON" ]; then
+                    echo "tcp flags syn tcp option maxseg size set $new_val" > "$MSS_FILE"
+                    nft -f "$MAIN_CONF"
+                fi
+                echo -e "${GREEN}数值已更新！${RESET}"
+            else
+                echo -e "${RED}输入非法。${RESET}"
+            fi
+            sleep 1
+            ;;
+    esac
+}
+
+# --- [3. 自动架构初始化] ---
 init_env() {
     if [ "$EUID" -ne 0 ]; then echo -e "${RED}请用 root 运行！${RESET}"; exit 1; fi
 
     mkdir -p "$DIR_PATH"
     touch "$CONFIG_FILE"
+    [ ! -f "$STATUS_FILE" ] && echo "OFF" > "$STATUS_FILE"
+    [ ! -f "$ACTION_FILE" ] && touch "$ACTION_FILE"
+    
+    # 初始化 MSS 存储
+    [ ! -f "$MSS_STATUS_FILE" ] && echo "OFF" > "$MSS_STATUS_FILE"
+    [ ! -f "$MSS_VALUE_FILE" ] && echo "1338" > "$MSS_VALUE_FILE"
+    [ ! -f "$MSS_FILE" ] && touch "$MSS_FILE"
 
-    # 🐛 核心修复：完美兼容一键运行与本地执行
     if [[ "$0" == *"bash"* || "$0" == *"/dev/fd/"* ]]; then
-        # 如果是 curl | bash 运行，必须通过网络拉取实体文件来生成快捷命令
-        curl -sL "https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh" -o /usr/local/bin/nf
+        curl -sL "https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh" -o /usr/local/bin/nf 2>/dev/null
     else
-        # 如果是本地执行 (如 ./nf_manager.sh)，直接复制本体
         cp "$0" /usr/local/bin/nf 2>/dev/null
     fi
-    
-    # 统一赋予执行权限
     chmod +x /usr/local/bin/nf 2>/dev/null
 
     if ! command -v nft >/dev/null 2>&1; then
         apt-get update && apt-get install -y nftables
     fi
 
-    if [ ! -f "$RULES_FILE" ]; then
-        apply_rules >/dev/null 2>&1
+    if [ ! -f "$WHITELIST_DEF" ]; then
+        cat > "$WHITELIST_DEF" << EOF
+# 专线前置拦截白名单
+define ALLOWED_CIDRS = {
+    127.0.0.1/32
+}
+EOF
     fi
 
-    if [ -f "$MAIN_CONF" ]; then
-        if ! grep -q "include \"$RULES_FILE\"" "$MAIN_CONF"; then
-            echo -e "\n# NF-Manager 转发模块注入" >> "$MAIN_CONF"
-            echo "include \"$RULES_FILE\"" >> "$MAIN_CONF"
+    if [ ! -f "$RULES_FILE" ]; then apply_rules >/dev/null 2>&1; fi
+
+    # 接管主控文件
+    if ! grep -q "nf_manager/rules.nft" "$MAIN_CONF" 2>/dev/null; then
+        echo -e "${CYAN}正在初始化内核防火墙框架...${RESET}"
+        read -p "【配置】请输入当前机器的 SSH 端口 (默认22): " ssh_port
+        [ -z "$ssh_port" ] && ssh_port="22"
+        
+        read -p "【调优】是否默认开启 MTU 钳制? (y/n, 默认n): " mss_init
+        if [ "$mss_init" == "y" ]; then
+            echo "tcp flags syn tcp option maxseg size set 1338" > "$MSS_FILE"
+            echo "ON" > "$MSS_STATUS_FILE"
         fi
+
+        [ -f "$MAIN_CONF" ] && cp "$MAIN_CONF" "${MAIN_CONF}.bak"
+        
+        cat > "$MAIN_CONF" << EOF
+#!/usr/sbin/nft -f
+flush ruleset
+
+# 1. 引入白名单 CIDR 集合文件
+include "$WHITELIST_DEF"
+
+table ip filter {
+    # 动态访客集合
+    set temp_ips {
+        type ipv4_addr
+        flags timeout
+    }
+
+    # 【防御层：核弹级前置拦截】
+    chain prerouting_filter {
+        type filter hook prerouting priority -150; policy accept;
+        
+        # 放行已建立连接与 SSH
+        ct state established,related accept
+        tcp dport $ssh_port accept
+
+        # 挂载白名单开关
+        include "$ACTION_FILE"
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        iifname "lo" accept
+        ip protocol icmp accept
+        
+        tcp dport $ssh_port accept
+        
+        # 本地业务
+        tcp dport { 80, 443, 2053, 2083, 8443, 35782, 42755, 51294 } accept
+        udp dport 35782 accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        
+        # 挂载 MSS 调优模块
+        include "$MSS_FILE"
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+
+# 引入 NAT 转发规则
+include "$RULES_FILE"
+EOF
+        nft -f "$MAIN_CONF"
+        echo -e "${GREEN}✅ 框架初始化完成！${RESET}"
+        sleep 2
     fi
 }
 
@@ -214,25 +313,32 @@ init_env
 
 while true; do
     clear
+    status_wl=$(cat "$STATUS_FILE" 2>/dev/null)
+    status_mss=$(cat "$MSS_STATUS_FILE" 2>/dev/null)
+    
     echo -e "${CYAN}=================================================${RESET}"
-    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v3.0          ${RESET}"
+    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v4.2          ${RESET}"
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
     echo -e "  ${GREEN}1.${RESET} 添加转发规则"
     echo -e "  ${RED}2.${RESET} 删除转发规则"
-    echo -e "  ${YELLOW}3.${RESET} 手动热重载转发"
-    echo -e "  ${CYAN}4.${RESET} 编辑 CIDR 防御白名单 (自动重载主防火墙)"
-    echo -e "  ${CYAN}5.${RESET} 查看限时放行名单 (临时测试 IP)"
+    echo -e "  ${YELLOW}3.${RESET} 手动热重载全局网络"
+    echo -e "  ${CYAN}4.${RESET} 编辑 CIDR 防御白名单"
+    echo -e "  ${CYAN}5.${RESET} 白名单拦截开关  [当前: $([ "$status_wl" == "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
+    echo -e "  ${CYAN}6.${RESET} MTU/MSS 钳制调优 [当前: $([ "$status_mss" == "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
+    echo -e "  ${CYAN}7.${RESET} 查看限时放行名单 (Temp IPs)"
     echo -e "  ${CYAN}0.${RESET} 退出"
     echo -e "${CYAN}=================================================${RESET}"
-    read -p "请输入指令 [0-5]: " choice
+    read -p "请输入指令 [0-7]: " choice
     case $choice in
         1) add_rule ;;
         2) delete_rule ;;
-        3) apply_rules; sleep 2 ;;
+        3) nft -f "$MAIN_CONF"; echo -e "${GREEN}已重载！${RESET}"; sleep 1 ;;
         4) edit_whitelist ;;
-        5) view_temp_ips ;;
+        5) toggle_whitelist ;;
+        6) manage_mss ;;
+        7) view_temp_ips ;;
         0) exit 0 ;;
         *) echo -e "${RED}无效输入${RESET}"; sleep 1 ;;
     esac
