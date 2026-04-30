@@ -173,20 +173,25 @@ view_temp_ips() {
 
 # --- [3. 模块化环境初始化] ---
 
+# --- [3. 模块化环境初始化] ---
+
 init_env() {
     if [ "$EUID" -ne 0 ]; then echo -e "${RED}请用 root 运行！${RESET}"; exit 1; fi
 
     mkdir -p "$DIR_PATH"
     touch "$CONFIG_FILE"
 
-    if [[ "$0" == *"bash"* || "$0" == "/dev/fd/"* ]]; then
-        # 如果你将其传到了 github，可以取消注释下面这行自动更新
-        # curl -sL "https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh" -o /usr/local/bin/nf
-        :
+    # 🐛 核心修复：完美兼容一键运行与本地执行
+    if [[ "$0" == *"bash"* || "$0" == *"/dev/fd/"* ]]; then
+        # 如果是 curl | bash 运行，必须通过网络拉取实体文件来生成快捷命令
+        curl -sL "https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh" -o /usr/local/bin/nf
     else
-        cp "$0" /usr/local/bin/nf
+        # 如果是本地执行 (如 ./nf_manager.sh)，直接复制本体
+        cp "$0" /usr/local/bin/nf 2>/dev/null
     fi
-    chmod +x /usr/local/bin/nf
+    
+    # 统一赋予执行权限
+    chmod +x /usr/local/bin/nf 2>/dev/null
 
     if ! command -v nft >/dev/null 2>&1; then
         apt-get update && apt-get install -y nftables
@@ -196,7 +201,6 @@ init_env() {
         apply_rules >/dev/null 2>&1
     fi
 
-    # 不再重复向 main 写入 include
     if [ -f "$MAIN_CONF" ]; then
         if ! grep -q "include \"$RULES_FILE\"" "$MAIN_CONF"; then
             echo -e "\n# NF-Manager 转发模块注入" >> "$MAIN_CONF"
