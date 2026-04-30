@@ -2,12 +2,13 @@
 
 # =========================================================
 # 项目名称：NF-Manager 纯内核极速转发与安全面板
-# 版本：v4.2 (网络调优版 - 增加 MTU/MSS 动态管理)
+# 版本：v4.3 (无痕卸载版)
 # 特性：
 # 1. 独立 NAT 转发，不再需要手动放行 input 端口
 # 2. MSS 钳制模块化：支持自定义参数与一键开关
 # 3. 动态配置 SSH 端口，绝对防御下保证 SSH 不断连
 # 4. 白名单物理开关，核弹级 prerouting_filter 拦截
+# 5. [新增] 完美无痕卸载与环境回退机制
 # =========================================================
 
 # --- [1. 路径定义] ---
@@ -152,7 +153,6 @@ EOF
     sleep 2
 }
 
-# --- [新增] MSS 钳制管理 ---
 manage_mss() {
     local status=$(cat "$MSS_STATUS_FILE" 2>/dev/null)
     local current_val=$(cat "$MSS_VALUE_FILE" 2>/dev/null)
@@ -195,6 +195,69 @@ manage_mss() {
             sleep 1
             ;;
     esac
+}
+
+view_temp_ips() {
+    echo -e "\n${CYAN}--- ⏳ 当前处于临时放行的访客名单 ---${RESET}"
+    local temp_info=$(nft list set ip filter temp_ips 2>/dev/null)
+    
+    if [ -z "$temp_info" ]; then
+         echo -e "${YELLOW}主配置文件中尚未配置 temp_ips 集合。${RESET}"
+    elif echo "$temp_info" | grep -q "elements = { }"; then
+         echo -e "${GREEN}当前没有任何临时放行的 IP。城墙紧闭！${RESET}"
+    else
+         echo -e "${YELLOW}警告：以下 IP 拥有临时通行证！${RESET}"
+         echo "$temp_info" | grep "expires" | sed 's/elements = { //g' | sed 's/ }//g' | tr ',' '\n' | while read -r line; do
+             if [ -n "$line" ]; then echo -e " 🔓 $line"; fi
+         done
+    fi
+    echo "------------------------------------------------"
+    echo "按任意键返回主菜单..."
+    read -n 1 -s
+}
+
+# --- [新增] 完全卸载功能 ---
+uninstall_script() {
+    clear
+    echo -e "${RED}=================================================${RESET}"
+    echo -e "${RED}              ⚠️ 危险操作：完全卸载 ⚠️               ${RESET}"
+    echo -e "${RED}=================================================${RESET}"
+    echo -e "此操作将彻底删除 NF-Manager 面板，并清空所有转发与拦截规则。"
+    read -p "您确定要继续吗？(y/n): " confirm_un
+    if [[ "$confirm_un" != "y" && "$confirm_un" != "Y" ]]; then
+        echo -e "${GREEN}已取消卸载。${RESET}"
+        sleep 2
+        return
+    fi
+
+    echo -e "\n${CYAN}[1/4] 正在清理内核规则与恢复主配置文件...${RESET}"
+    if [ -f "${MAIN_CONF}.bak" ]; then
+        echo -e "${YELLOW}发现初始备份文件，正在为您还原...${RESET}"
+        mv "${MAIN_CONF}.bak" "$MAIN_CONF"
+        nft -f "$MAIN_CONF" >/dev/null 2>&1
+    else
+        echo -e "${YELLOW}未发现备份，正在为您重置为空白状态...${RESET}"
+        echo -e "#!/usr/sbin/nft -f\nflush ruleset" > "$MAIN_CONF"
+        nft flush ruleset >/dev/null 2>&1
+    fi
+
+    echo -e "${CYAN}[2/4] 正在删除脚本目录与配置文件...${RESET}"
+    rm -rf "$DIR_PATH"
+    rm -f "$WHITELIST_DEF"
+
+    echo -e "${CYAN}[3/4] 正在移除全局 nf 命令...${RESET}"
+    rm -f /usr/local/bin/nf
+
+    echo -e "${CYAN}[4/4] 环境清理选项...${RESET}"
+    read -p "是否需要同时彻底卸载 nftables 软件包？(如果您不再使用任何防火墙，请选y。默认n): " purge_nft
+    if [[ "$purge_nft" == "y" || "$purge_nft" == "Y" ]]; then
+        echo -e "${YELLOW}正在卸载 nftables...${RESET}"
+        apt-get remove --purge -y nftables >/dev/null 2>&1
+        apt-get autoremove -y >/dev/null 2>&1
+    fi
+
+    echo -e "\n${GREEN}✅ 卸载完毕！系统已恢复纯净状态。指挥官，江湖再见！${RESET}"
+    exit 0
 }
 
 # --- [3. 自动架构初始化] ---
@@ -317,7 +380,7 @@ while true; do
     status_mss=$(cat "$MSS_STATUS_FILE" 2>/dev/null)
     
     echo -e "${CYAN}=================================================${RESET}"
-    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v4.2          ${RESET}"
+    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v4.3          ${RESET}"
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
@@ -328,9 +391,10 @@ while true; do
     echo -e "  ${CYAN}5.${RESET} 白名单拦截开关  [当前: $([ "$status_wl" == "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
     echo -e "  ${CYAN}6.${RESET} MTU/MSS 钳制调优 [当前: $([ "$status_mss" == "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
     echo -e "  ${CYAN}7.${RESET} 查看限时放行名单 (Temp IPs)"
+    echo -e "  ${RED}8. 完全卸载面板 (清理全部规则及文件)${RESET}"
     echo -e "  ${CYAN}0.${RESET} 退出"
     echo -e "${CYAN}=================================================${RESET}"
-    read -p "请输入指令 [0-7]: " choice
+    read -p "请输入指令 [0-8]: " choice
     case $choice in
         1) add_rule ;;
         2) delete_rule ;;
@@ -339,6 +403,7 @@ while true; do
         5) toggle_whitelist ;;
         6) manage_mss ;;
         7) view_temp_ips ;;
+        8) uninstall_script ;;
         0) exit 0 ;;
         *) echo -e "${RED}无效输入${RESET}"; sleep 1 ;;
     esac
