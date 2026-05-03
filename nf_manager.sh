@@ -2,13 +2,6 @@
 
 # =========================================================
 # 项目名称：NF-Manager 纯内核极速转发与安全面板
-# 版本：v4.3 (无痕卸载版)
-# 特性：
-# 1. 独立 NAT 转发，不再需要手动放行 input 端口
-# 2. MSS 钳制模块化：支持自定义参数与一键开关
-# 3. 动态配置 SSH 端口，绝对防御下保证 SSH 不断连
-# 4. 白名单物理开关，核弹级 prerouting_filter 拦截
-# 5. [新增] 完美无痕卸载与环境回退机制
 # =========================================================
 
 # --- [1. 路径定义] ---
@@ -18,11 +11,9 @@ RULES_FILE="${DIR_PATH}/rules.nft"
 WHITELIST_DEF="/etc/my_allow_ips.nft"
 ACTION_FILE="${DIR_PATH}/whitelist_action.nft"
 STATUS_FILE="${DIR_PATH}/whitelist.status"
-# 新增 MSS 调优路径
 MSS_FILE="${DIR_PATH}/mss.nft"
 MSS_STATUS_FILE="${DIR_PATH}/mss.status"
 MSS_VALUE_FILE="${DIR_PATH}/mss.value"
-
 MAIN_CONF="/etc/nftables.conf"
 
 RED="\033[31m"
@@ -32,6 +23,25 @@ CYAN="\033[36m"
 RESET="\033[0m"
 
 # --- [2. 核心功能函数] ---
+
+# 动态生成白名单拦截动作
+generate_whitelist_action() {
+    # 提取所有当前正在转发的本地端口，并拼接成逗号分隔格式 (例如: 8301,8302)
+    local ports=$(awk '{print $1}' "$CONFIG_FILE" | grep -v '^[[:space:]]*$' | tr '\n' ',' | sed 's/,$//')
+    
+    if [ -z "$ports" ]; then
+        echo "# 当前没有任何转发端口，白名单无生效目标" > "$ACTION_FILE"
+    else
+        cat > "$ACTION_FILE" << EOF
+        # 核心防御：白名单与临时访客放行
+        ip saddr \$ALLOWED_CIDRS accept
+        ip saddr @temp_ips accept
+        # 精准狙击：非白名单IP访问【转发端口】直接抛弃，其余端口正常放行至本机
+        tcp dport { $ports } drop
+        udp dport { $ports } drop
+EOF
+    fi
+}
 
 list_rules() {
     echo -e "\n${CYAN}--- 🚀 当前正在运行的转发规则 ---${RESET}"
@@ -82,6 +92,12 @@ EOF
 
     echo "    }" >> "$RULES_FILE"
     echo "}" >> "$RULES_FILE"
+
+    # 【新增逻辑】：如果白名单处于开启状态，规则变动时自动更新拦截端口
+    local status=$(cat "$STATUS_FILE" 2>/dev/null)
+    if [ "$status" == "ON" ]; then
+        generate_whitelist_action
+    fi
 
     nft -f "$MAIN_CONF" >/dev/null 2>&1
     echo -e "${GREEN}✅ 转发规则已热加载至内核独立区域！${RESET}"
@@ -140,15 +156,10 @@ toggle_whitelist() {
         nft -f "$MAIN_CONF"
         echo -e "${GREEN}🔓 防御已撤除：所有 IP 均可访问转发端口！${RESET}"
     else
-        cat > "$ACTION_FILE" << EOF
-        # 核心防御：只允许白名单和临时访客，其他抛弃
-        ip saddr \$ALLOWED_CIDRS accept
-        ip saddr @temp_ips accept
-        drop
-EOF
+        generate_whitelist_action
         echo "ON" > "$STATUS_FILE"
         nft -f "$MAIN_CONF"
-        echo -e "${RED}🛡️ 铁幕降临：非白名单 IP 已被全面阻断！${RESET}"
+        echo -e "${RED}🛡️ 精准防御启动：仅白名单 IP 可访问中转端口，本机业务正常放行！${RESET}"
     fi
     sleep 2
 }
@@ -216,7 +227,6 @@ view_temp_ips() {
     read -n 1 -s
 }
 
-# --- [新增] 完全卸载功能 ---
 uninstall_script() {
     clear
     echo -e "${RED}=================================================${RESET}"
@@ -269,7 +279,6 @@ init_env() {
     [ ! -f "$STATUS_FILE" ] && echo "OFF" > "$STATUS_FILE"
     [ ! -f "$ACTION_FILE" ] && touch "$ACTION_FILE"
     
-    # 初始化 MSS 存储
     [ ! -f "$MSS_STATUS_FILE" ] && echo "OFF" > "$MSS_STATUS_FILE"
     [ ! -f "$MSS_VALUE_FILE" ] && echo "1338" > "$MSS_VALUE_FILE"
     [ ! -f "$MSS_FILE" ] && touch "$MSS_FILE"
@@ -296,7 +305,6 @@ EOF
 
     if [ ! -f "$RULES_FILE" ]; then apply_rules >/dev/null 2>&1; fi
 
-    # 接管主控文件
     if ! grep -q "nf_manager/rules.nft" "$MAIN_CONF" 2>/dev/null; then
         echo -e "${CYAN}正在初始化内核防火墙框架...${RESET}"
         read -p "【配置】请输入当前机器的 SSH 端口 (默认22): " ssh_port
@@ -324,15 +332,14 @@ table ip filter {
         flags timeout
     }
 
-    # 【防御层：核弹级前置拦截】
+    # 【防御层：精准转发拦截】
     chain prerouting_filter {
         type filter hook prerouting priority -150; policy accept;
         
-        # 放行已建立连接与 SSH
         ct state established,related accept
         tcp dport $ssh_port accept
 
-        # 挂载白名单开关
+        # 动态挂载精准白名单策略
         include "$ACTION_FILE"
     }
 
@@ -345,15 +352,13 @@ table ip filter {
         
         tcp dport $ssh_port accept
         
-        # 本地业务
+        # 本地业务 (此处放行的端口不受到白名单的影响)
         tcp dport { 80, 443, 2053, 2083, 8443, 35782, 42755, 51294 } accept
         udp dport 35782 accept
     }
 
     chain forward {
         type filter hook forward priority filter; policy accept;
-        
-        # 挂载 MSS 调优模块
         include "$MSS_FILE"
     }
 
@@ -380,7 +385,7 @@ while true; do
     status_mss=$(cat "$MSS_STATUS_FILE" 2>/dev/null)
     
     echo -e "${CYAN}=================================================${RESET}"
-    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v4.3          ${RESET}"
+    echo -e "${CYAN}          NF-Manager 专线安全网关面板 v4.4          ${RESET}"
     echo -e "${CYAN}=================================================${RESET}"
     list_rules
     echo -e "\n请选择操作:"
