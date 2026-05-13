@@ -353,7 +353,7 @@ table ip filter {
         tcp dport $ssh_port accept
         
         # 本地业务 (此处放行的端口不受到白名单的影响)
-        tcp dport { 80, 443, 2053, 2083, 8443, 35782, 42755, 51294 } accept
+        tcp dport { 80, 443, 2053, 2083, 8443, 35782, 42751, 42755, 51294 } accept
         udp dport 35782 accept
     }
 
