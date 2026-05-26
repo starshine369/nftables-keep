@@ -33,7 +33,7 @@ bash <(curl -sL https://raw.githubusercontent.com/starshine369/nftables-keep/mai
 ### 国内机器 / GitHub 访问较慢时
 
 ```bash
-bash <(curl -sL https://ghproxy.net/https://raw.githubusercontent.com/starshine369/nftables-keep/main/nf_manager.sh)
+bash <(curl -sL https://cnb.cool/starshine369/nftables-keep/main/nf_manager.sh)
 ```
 
 > 系统支持：Debian / Ubuntu / CentOS / AlmaLinux / RockyLinux 等主流发行版（自动识别包管理器）
