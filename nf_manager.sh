@@ -127,6 +127,32 @@ pad_display() {
     fi
 }
 
+truncate_display() {
+    local s="$1" max="$2"
+    local out="" i ch w=0 cw
+    for ((i=0; i<${#s}; i++)); do
+        ch="${s:i:1}"
+        cw=$(display_width "$ch")
+        [ $((w + cw)) -gt "$max" ] && break
+        out+="$ch"
+        w=$((w + cw))
+    done
+    printf '%s' "$out"
+}
+
+center_display() {
+    local s="$1" target="$2"
+    local w left right
+    w=$(display_width "$s")
+    if [ "$w" -ge "$target" ]; then
+        printf '%s' "$s"
+        return
+    fi
+    left=$(( (target - w) / 2 ))
+    right=$(( target - w - left ))
+    printf '%*s%s%*s' "$left" "" "$s" "$right" ""
+}
+
 # 备份单个文件到 BACKUP_DIR，按文件名前缀维护保留份数
 backup_file() {
     local src="$1"
@@ -512,8 +538,10 @@ list_rules() {
         echo "------------------------------------------------------------------------------------------------"
         return
     fi
-    printf "${BOLD}%-4s %-7s %-30s %-7s %-9s %-8s %-7s %-6s %s${RESET}\n" \
-        "序号" "本地" "目标" "目标端" "协议" "模式" "方向" "引擎" "备注"
+    printf "%b%s %s %s %s %s %s %s %s %s%b\n" "$BOLD" \
+        "$(center_display "序号" 4)" "$(center_display "本地" 13)" "$(center_display "目标" 22)" \
+        "$(center_display "目标端" 9)" "$(center_display "协议" 7)" "$(center_display "模式" 7)" \
+        "$(center_display "方向" 4)" "$(center_display "引擎" 6)" "$(center_display "备注" 28)" "$RESET"
     echo "------------------------------------------------------------------------------------------------"
     local idx=1 line
     while IFS= read -r line; do
@@ -524,12 +552,15 @@ list_rules() {
             rip=$(cache_get "$P_TARGET" "$P_TARGET_FAMILY")
             [ -n "$rip" ] && target_show="${P_TARGET}(${rip})"
         fi
-        local target_disp comment_disp direction row
-        target_disp=$(printf '%-30.30s' "$target_show")
-        comment_disp=$(printf '%-28.28s' "$P_COMMENT")
+        local seq target_disp comment_disp direction
+        seq="[$idx]"
+        target_disp=$(truncate_display "$target_show" 30)
+        comment_disp=$(truncate_display "$P_COMMENT" 28)
         direction=$(printf 'v%s→v%s' "$P_LISTEN_FAMILY" "$P_TARGET_FAMILY")
-        row=$(printf '[%d] %-7s %s %-7s %-9s %-8s %-7s %-6s %s' "$idx" "$P_LPORT" "$target_disp" "$P_RPORT" "$P_PROTO" "$P_MODE" "$direction" "$P_ENGINE" "$comment_disp")
-        echo "$row"
+        printf "%s %s %s %s %s %s %s %s %s\n" \
+            "$(center_display "$seq" 4)" "$(center_display "$P_LPORT" 13)" "$(center_display "$target_disp" 22)" \
+            "$(center_display "$P_RPORT" 9)" "$(center_display "$P_PROTO" 7)" "$(center_display "$P_MODE" 7)" \
+            "$(center_display "$direction" 4)" "$(center_display "$P_ENGINE" 6)" "$(center_display "$comment_disp" 28)"
         ((idx++))
     done < "$CONFIG_FILE"
     echo "------------------------------------------------------------------------------------------------"
