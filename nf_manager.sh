@@ -524,11 +524,12 @@ list_rules() {
             rip=$(cache_get "$P_TARGET" "$P_TARGET_FAMILY")
             [ -n "$rip" ] && target_show="${P_TARGET}(${rip})"
         fi
-        local target_disp="${target_show:0:29}"
-        local comment_disp="${P_COMMENT:0:28}"
-        local direction="v${P_LISTEN_FAMILY}→v${P_TARGET_FAMILY}"
-        printf "[%-2s] %-7s %-30s %-7s %-9s %-8s %-7s %-6s %s\n" \
-            "$idx" "$P_LPORT" "$target_disp" "$P_RPORT" "$P_PROTO" "$P_MODE" "$direction" "$P_ENGINE" "$comment_disp"
+        local target_disp comment_disp direction row
+        target_disp=$(printf '%-30.30s' "$target_show")
+        comment_disp=$(printf '%-28.28s' "$P_COMMENT")
+        direction=$(printf 'v%s→v%s' "$P_LISTEN_FAMILY" "$P_TARGET_FAMILY")
+        row=$(printf '[%d] %-7s %s %-7s %-9s %-8s %-7s %-6s %s' "$idx" "$P_LPORT" "$target_disp" "$P_RPORT" "$P_PROTO" "$P_MODE" "$direction" "$P_ENGINE" "$comment_disp")
+        echo "$row"
         ((idx++))
     done < "$CONFIG_FILE"
     echo "------------------------------------------------------------------------------------------------"
@@ -821,7 +822,13 @@ edit_rule() {
     echo -e "\n${CYAN}当前值：${RESET}本地=$P_LPORT(v${P_LISTEN_FAMILY}) 目标=$P_TARGET(v${P_TARGET_FAMILY}) 目标端口=$P_RPORT 协议=$P_PROTO 模式=$P_MODE 引擎=$P_ENGINE 备注=$P_COMMENT"
     echo "（回车保留原值；切换目标协议族时会按 A/AAAA 重新解析或要求重填 IP）"
 
-    local new_target="$P_TARGET" new_rport="$P_RPORT" new_proto="$P_PROTO" new_comment="$P_COMMENT" new_listen_family="$P_LISTEN_FAMILY" new_target_family="$P_TARGET_FAMILY" new_mode="$P_MODE" v detected
+    local new_lport="$P_LPORT" new_target="$P_TARGET" new_rport="$P_RPORT" new_proto="$P_PROTO" new_comment="$P_COMMENT" new_listen_family="$P_LISTEN_FAMILY" new_target_family="$P_TARGET_FAMILY" new_mode="$P_MODE" v detected
+
+    read -p "新本地端口 [$P_LPORT]: " v
+    if [ -n "$v" ]; then
+        validate_port "$v" || { echo -e "${RED}端口非法${RESET}"; sleep 1; return; }
+        new_lport="$v"
+    fi
 
     read -p "新本地协议族 (4/6) [$P_LISTEN_FAMILY]: " v
     [ -n "$v" ] && new_listen_family=$(normalize_family "$v")
@@ -885,9 +892,15 @@ edit_rule() {
 
     ensure_realm_for_cross_family "$new_listen_family" "$new_target_family" || { sleep 1; return; }
 
+    if [ "$new_lport" != "$P_LPORT" ] && grep -qE "^${new_lport}\|" "$CONFIG_FILE"; then
+        echo -e "${RED}新本地端口已存在${RESET}"
+        sleep 1
+        return
+    fi
+
     backup_file "$CONFIG_FILE"
     local new_line
-    new_line=$(format_rule_line "$P_LPORT" "$new_target" "$new_rport" "$new_proto" "$new_mode" "$new_comment" "$new_listen_family" "$new_target_family")
+    new_line=$(format_rule_line "$new_lport" "$new_target" "$new_rport" "$new_proto" "$new_mode" "$new_comment" "$new_listen_family" "$new_target_family")
     new_line=${new_line%$'\n'}
     awk -v ln="$real_line" -v repl="$new_line" 'NR==ln{print repl; next} {print}' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" \
         && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
@@ -1927,8 +1940,12 @@ net.ipv4.conf.all.rp_filter = 2
 #   默认禁止；若需要把外部流量转发到本机回环服务（如本机的 socks/proxy）必须开启
 net.ipv4.conf.all.route_localnet = 1
 EOF
-        sysctl -p "$conf" >/dev/null 2>&1
         log_msg INFO INIT "已写入 sysctl 持久化 $conf"
+    fi
+    if sysctl --system >/dev/null 2>&1 || sysctl -p "$conf" >/dev/null 2>&1; then
+        log_msg INFO INIT "已重载 sysctl 内核参数"
+    else
+        log_msg WARN INIT "sysctl 重载失败"
     fi
 }
 
