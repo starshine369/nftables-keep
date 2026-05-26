@@ -129,7 +129,26 @@ pad_display() {
 
 truncate_display() {
     local s="$1" max="$2"
+    local out="" i ch w=0 cw limit
+    [ "$max" -le 1 ] && { printf '%s' ''; return; }
+    limit=$((max - 1))
+    for ((i=0; i<${#s}; i++)); do
+        ch="${s:i:1}"
+        cw=$(display_width "$ch")
+        [ $((w + cw)) -gt "$limit" ] && break
+        out+="$ch"
+        w=$((w + cw))
+    done
+    if [ "$w" -lt "$(display_width "$s")" ]; then
+        out+="…"
+    fi
+    printf '%s' "$out"
+}
+
+truncate_display_exact() {
+    local s="$1" max="$2"
     local out="" i ch w=0 cw
+    [ "$max" -le 0 ] && { printf '%s' ''; return; }
     for ((i=0; i<${#s}; i++)); do
         ch="${s:i:1}"
         cw=$(display_width "$ch")
@@ -541,7 +560,7 @@ list_rules() {
     printf "%b%s %s %s %s %s %s %s %s %s%b\n" "$BOLD" \
         "$(center_display "序号" 4)" "$(center_display "本地" 13)" "$(center_display "目标" 22)" \
         "$(center_display "目标端" 9)" "$(center_display "协议" 7)" "$(center_display "模式" 7)" \
-        "$(center_display "方向" 4)" "$(center_display "引擎" 6)" "$(center_display "备注" 28)" "$RESET"
+        "$(center_display "方向" 4)" "$(center_display "引擎" 6)" "备注" "$RESET"
     echo "------------------------------------------------------------------------------------------------"
     local idx=1 line
     while IFS= read -r line; do
@@ -554,13 +573,13 @@ list_rules() {
         fi
         local seq target_disp comment_disp direction
         seq="[$idx]"
-        target_disp=$(truncate_display "$target_show" 30)
+        target_disp=$(truncate_display "$target_show" 22)
         comment_disp=$(truncate_display "$P_COMMENT" 28)
         direction=$(printf 'v%s→v%s' "$P_LISTEN_FAMILY" "$P_TARGET_FAMILY")
         printf "%s %s %s %s %s %s %s %s %s\n" \
             "$(center_display "$seq" 4)" "$(center_display "$P_LPORT" 13)" "$(center_display "$target_disp" 22)" \
             "$(center_display "$P_RPORT" 9)" "$(center_display "$P_PROTO" 7)" "$(center_display "$P_MODE" 7)" \
-            "$(center_display "$direction" 4)" "$(center_display "$P_ENGINE" 6)" "$(center_display "$comment_disp" 28)"
+            "$(center_display "$direction" 4)" "$(center_display "$P_ENGINE" 6)" "$comment_disp"
         ((idx++))
     done < "$CONFIG_FILE"
     echo "------------------------------------------------------------------------------------------------"
