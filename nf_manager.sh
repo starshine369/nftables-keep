@@ -23,6 +23,13 @@
 
 set -o pipefail
 
+# 终端显示对齐依赖 bash 在 UTF-8 locale 下统计字符数（${#var}）
+# 大多数现代发行版默认为 UTF-8；若是 C/POSIX locale 显式切到 C.UTF-8
+case "${LC_ALL:-${LANG:-C}}" in
+    *UTF-8*|*utf8*) ;;
+    *) export LANG=C.UTF-8 LC_ALL=C.UTF-8 ;;
+esac
+
 # --- [1. 路径与常量] ---
 DIR_PATH="/etc/nf_manager"
 BACKUP_DIR="${DIR_PATH}/backups"
@@ -72,6 +79,40 @@ err_exit() {
     echo -e "${RED}❌ $*${RESET}" >&2
     log_msg ERROR FATAL "$*"
     exit 1
+}
+
+# ----- 终端显示宽度工具（处理中文等宽字符对齐） -----
+# 计算字符串去除 ANSI 转义后的显示宽度
+# 规则：ASCII 算 1 列，多字节字符（CJK / 全角）算 2 列
+# 依赖：UTF-8 locale（脚本顶部已确保）
+display_width() {
+    local s="$1"
+    # 移除 ANSI 转义序列 (ESC[...letter)
+    s=$(printf '%s' "$s" | sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g')
+    local bytes chars cjk
+    bytes=$(printf '%s' "$s" | wc -c)
+    chars=${#s}
+    if [ "$bytes" -eq "$chars" ]; then
+        # ${#} 返回字节数（非 UTF-8 locale），全部按 1 列算
+        echo "$chars"
+    else
+        # UTF-8 下 CJK 占 3 字节 1 字符，差值的一半即 CJK 数
+        cjk=$(( (bytes - chars) / 2 ))
+        echo $(( chars + cjk ))
+    fi
+}
+
+# 把字符串补齐空格到指定显示宽度（用于表格右侧对齐）
+pad_display() {
+    local s="$1" target="$2"
+    local w pad
+    w=$(display_width "$s")
+    pad=$((target - w))
+    if [ "$pad" -gt 0 ]; then
+        printf '%s%*s' "$s" "$pad" ""
+    else
+        printf '%s' "$s"
+    fi
 }
 
 # 备份单个文件到 BACKUP_DIR，按文件名前缀维护保留份数
@@ -912,11 +953,14 @@ manage_mss() {
 
 print_check() {
     # $1=状态符号 OK/FAIL/WARN  $2=描述  $3=详情
+    local marker
     case "$1" in
-        OK)   printf "  ${GREEN}[✓]${RESET} %-40s %s\n" "$2" "$3" ;;
-        FAIL) printf "  ${RED}[✗]${RESET} %-40s %s\n" "$2" "$3" ;;
-        WARN) printf "  ${YELLOW}[!]${RESET} %-40s %s\n" "$2" "$3" ;;
+        OK)   marker="${GREEN}[✓]${RESET}" ;;
+        FAIL) marker="${RED}[✗]${RESET}" ;;
+        WARN) marker="${YELLOW}[!]${RESET}" ;;
     esac
+    # 描述列统一补齐到显示宽度 36，详情从同一列开始
+    printf '  %b %s  %s\n' "$marker" "$(pad_display "$2" 36)" "$3"
 }
 
 diagnose() {
@@ -927,10 +971,11 @@ diagnose() {
 
     # --- 1. 内核转发参数 ---
     echo -e "\n${BOLD}[1/7] 内核转发参数${RESET}"
-    local v4_fwd v6_fwd rp_filter
+    local v4_fwd v6_fwd rp_filter route_localnet
     v4_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
     v6_fwd=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null)
     rp_filter=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null)
+    route_localnet=$(sysctl -n net.ipv4.conf.all.route_localnet 2>/dev/null)
 
     if [ "$v4_fwd" = "1" ]; then
         print_check OK "net.ipv4.ip_forward" "= 1"
@@ -943,16 +988,21 @@ diagnose() {
         print_check WARN "net.ipv6.conf.all.forwarding" "= ${v6_fwd:-?} (如不用 v6 可忽略)"
     fi
     if [ "$rp_filter" = "2" ] || [ "$rp_filter" = "0" ]; then
-        print_check OK "net.ipv4.conf.all.rp_filter" "= $rp_filter"
+        print_check OK "net.ipv4.conf.all.rp_filter" "= $rp_filter (转发友好)"
     else
         print_check WARN "net.ipv4.conf.all.rp_filter" "= $rp_filter (严格模式可能拦非对称路由)"
+    fi
+    if [ "$route_localnet" = "1" ]; then
+        print_check OK "net.ipv4.conf.all.route_localnet" "= 1 (允许 DNAT 到 127.0.0.0/8)"
+    else
+        print_check WARN "net.ipv4.conf.all.route_localnet" "= ${route_localnet:-?} (转发到本机回环时需开启)"
     fi
 
     # 持久化检查
     if grep -rqE '^\s*net\.ipv4\.ip_forward\s*=\s*1' /etc/sysctl.conf /etc/sysctl.d/ 2>/dev/null; then
-        print_check OK "ip_forward 持久化配置" "已写入 sysctl 配置"
+        print_check OK "sysctl 持久化" "已写入"
     else
-        print_check WARN "ip_forward 持久化配置" "未写入 sysctl，重启后可能丢失"
+        print_check WARN "sysctl 持久化" "未写入，重启后可能失效"
     fi
 
     # --- 2. nftables 安装与自启 ---
@@ -1156,7 +1206,10 @@ uninstall_full() {
     echo "  ✓ 删除 /etc/my_allow_ips.nft"
     echo "  ✓ 删除 /usr/local/bin/nf"
     echo "  ✓ 删除 /var/log/nf_manager.log 与 logrotate 配置"
-    echo "  ? 可选：卸载 nftables 软件包"
+    echo "  ✓ 删除 /etc/sysctl.d/99-nf_manager.conf（内核转发持久化）"
+    echo
+    echo -e "  ${YELLOW}? 最后一步会询问是否同时卸载 nftables 软件包（默认保留）${RESET}"
+    echo
     read -p "确认继续？(yes 完整输入): " y
     [ "$y" != "yes" ] && { echo "已取消"; sleep 1; return; }
 
@@ -1190,18 +1243,19 @@ uninstall_full() {
     echo -e "${CYAN}[4/6] 移除 nf 命令...${RESET}"
     rm -f /usr/local/bin/nf
 
-    echo -e "${CYAN}[5/6] 删除日志与 logrotate 配置...${RESET}"
+    echo -e "${CYAN}[5/6] 删除日志、logrotate 与 sysctl 配置...${RESET}"
     rm -f "$LOGROTATE_CONF"
     rm -f /var/log/nf_manager.log*
-
-    # 卸载 sysctl 持久化
     rm -f /etc/sysctl.d/99-nf_manager.conf
 
-    echo -e "${CYAN}[6/6] 是否卸载 nftables 软件包?${RESET}"
-    read -p "(y/N): " purge
+    echo -e "${CYAN}[6/6] 是否一并卸载 nftables 软件包?${RESET}"
+    echo -e "${YELLOW}  ⚠️  注意：卸载后机器将完全没有防火墙，且其它服务（如 docker、k8s）可能依赖它${RESET}"
+    read -p "  确认卸载 nftables 包? (y/N): " purge
     if [ "$purge" = "y" ] || [ "$purge" = "Y" ]; then
         remove_pkg nftables
-        echo -e "  已卸载 nftables"
+        echo -e "  ${GREEN}已卸载 nftables${RESET}"
+    else
+        echo -e "  ${CYAN}已保留 nftables 包${RESET}"
     fi
 
     echo -e "\n${GREEN}✅ 完全卸载完成，系统已恢复${RESET}"
@@ -1213,13 +1267,26 @@ uninstall_full() {
 # =========================================================
 
 ensure_persistent_sysctl() {
-    # 确保 ip_forward 持久化生效，避免重启失效
+    # 确保转发相关内核参数持久化，避免重启失效
     local conf="/etc/sysctl.d/99-nf_manager.conf"
     if [ ! -f "$conf" ]; then
         cat > "$conf" << 'EOF'
 # Managed by NF-Manager
+# ---- IPv4 转发（NAT/DNAT 必需） ----
 net.ipv4.ip_forward = 1
+
+# ---- IPv6 转发（用 v6 中转才需要；脚本目前 dnat 仅生成 v4 表，开着无副作用） ----
+net.ipv6.conf.all.forwarding = 1
+
+# ---- 反向路径过滤（防 IP 欺骗） ----
+#   1 严格：包从哪个接口进，回流必须走同接口，否则丢弃
+#          多网卡 / 非对称路由的中转机会误杀合法包
+#   2 宽松：只要能从任一接口返回就放行 → 适合 NAT / 转发场景
 net.ipv4.conf.all.rp_filter = 2
+
+# ---- 允许 DNAT 目标地址落在 127.0.0.0/8 ----
+#   默认禁止；若需要把外部流量转发到本机回环服务（如本机的 socks/proxy）必须开启
+net.ipv4.conf.all.route_localnet = 1
 EOF
         sysctl -p "$conf" >/dev/null 2>&1
         log_msg INFO INIT "已写入 sysctl 持久化 $conf"
@@ -1300,7 +1367,7 @@ EOF
         validate_port "$ssh_port" || ssh_port="22"
         echo "$ssh_port" > "$SSH_PORT_FILE"
 
-        read -p "【调优】是否默认开启 MTU 钳制? (y/N): " mss_init
+        read -p "【调优】是否默认开启 MTU 钳制? (y/N，回车=N 跳过): " mss_init
         if [ "$mss_init" = "y" ] || [ "$mss_init" = "Y" ]; then
             echo "tcp flags syn tcp option maxseg size set 1338" > "$MSS_FILE"
             echo "ON" > "$MSS_STATUS_FILE"
@@ -1428,26 +1495,31 @@ main_menu() {
         local status_wl status_mss
         status_wl=$(cat "$STATUS_FILE" 2>/dev/null)
         status_mss=$(cat "$MSS_STATUS_FILE" 2>/dev/null)
-        local resolver_state="未启用"
+        local wl_text mss_text resolver_text
+        [ "$status_wl" = "ON" ] && wl_text="${GREEN}开启${RESET}" || wl_text="${RED}关闭${RESET}"
+        [ "$status_mss" = "ON" ] && mss_text="${GREEN}开启${RESET}" || mss_text="${RED}关闭${RESET}"
         if [ -f "$RESOLVER_TIMER" ] && systemctl is-active --quiet nf_manager_resolver.timer 2>/dev/null; then
-            resolver_state="${GREEN}运行中${RESET}"
+            resolver_text="${GREEN}运行中${RESET}"
+        else
+            resolver_text="${YELLOW}未启用${RESET}"
         fi
 
         echo -e "${CYAN}╔══════════════════════════════════════════════════╗${RESET}"
-        echo -e "${CYAN}║       NF-Manager 专线安全网关  ${VERSION}               ║${RESET}"
+        echo -e "${CYAN}║       NF-Manager 专线安全网关  ${VERSION}              ║${RESET}"
         echo -e "${CYAN}╚══════════════════════════════════════════════════╝${RESET}"
         list_rules
         echo
-        echo -e "  ${GREEN}1)${RESET} 转发规则管理 (增/删/改/批量/导入导出)"
-        echo -e "  ${CYAN}2)${RESET} 防御白名单管理       [拦截: $([ "$status_wl" = "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
-        echo -e "  ${CYAN}3)${RESET} MTU/MSS 钳制调优     [当前: $([ "$status_mss" = "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
-        echo -e "  ${CYAN}4)${RESET} DDNS 解析器管理       [状态: $resolver_state]"
-        echo -e "  ${CYAN}5)${RESET} 系统诊断 (内核/服务/规则/连通性)"
-        echo -e "  ${YELLOW}6)${RESET} 查看操作日志"
-        echo -e "  ${YELLOW}7)${RESET} 查看备份列表"
-        echo -e "  ${YELLOW}8)${RESET} 仅卸载脚本本身（保留服务与规则）"
-        echo -e "  ${RED}99)${RESET} ⚠️  完全卸载（清理全部）"
-        echo -e "  ${CYAN}0)${RESET} 退出"
+        # 描述列统一补到显示宽度 34，状态列才能对齐
+        printf '  %b%s%b %s\n' "$GREEN" " 1)" "$RESET" "$(pad_display "转发规则管理 (增/删/改/批量/导入导出)" 34)"
+        printf '  %b%s%b %s [拦截: %b]\n' "$CYAN"   " 2)" "$RESET" "$(pad_display "防御白名单管理" 34)" "$wl_text"
+        printf '  %b%s%b %s [当前: %b]\n' "$CYAN"   " 3)" "$RESET" "$(pad_display "MTU/MSS 钳制调优" 34)" "$mss_text"
+        printf '  %b%s%b %s [状态: %b]\n' "$CYAN"   " 4)" "$RESET" "$(pad_display "DDNS 解析器管理" 34)" "$resolver_text"
+        printf '  %b%s%b %s\n' "$CYAN"   " 5)" "$RESET" "$(pad_display "系统诊断 (内核/服务/规则/连通性)" 34)"
+        printf '  %b%s%b %s\n' "$YELLOW" " 6)" "$RESET" "$(pad_display "查看操作日志" 34)"
+        printf '  %b%s%b %s\n' "$YELLOW" " 7)" "$RESET" "$(pad_display "查看备份列表" 34)"
+        printf '  %b%s%b %s\n' "$YELLOW" " 8)" "$RESET" "$(pad_display "仅卸载脚本本身 (保留服务与规则)" 34)"
+        printf '  %b%s%b %s\n' "$RED"    "99)" "$RESET" "$(pad_display "⚠️  完全卸载 (清理全部，含可选 nftables)" 34)"
+        printf '  %b%s%b %s\n' "$CYAN"   " 0)" "$RESET" "退出"
         echo -e "${CYAN}══════════════════════════════════════════════════${RESET}"
         read -p "请输入指令: " choice
         case "$choice" in
