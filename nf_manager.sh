@@ -1,7 +1,7 @@
 #!/bin/bash
 # =========================================================
 # 项目名称：NF-Manager 纯内核极速转发与安全面板
-# 版本：v5.1
+# 版本：v5.2
 # 仓库：https://github.com/starshine369/nftables-keep
 # =========================================================
 #
@@ -44,6 +44,9 @@ ACTION6_FILE="${DIR_PATH}/whitelist_action6.nft"
 REALM_INPUT_FILE="${DIR_PATH}/realm_input.nft"
 REALM_INPUT6_FILE="${DIR_PATH}/realm_input6.nft"
 STATUS_FILE="${DIR_PATH}/whitelist.status"
+PROTO_BLOCK_FILE="${DIR_PATH}/proto_block.nft"
+PROTO_BLOCK6_FILE="${DIR_PATH}/proto_block6.nft"
+PROTO_BLOCK_STATUS_FILE="${DIR_PATH}/proto_block.status"
 MSS_FILE="${DIR_PATH}/mss.nft"
 MSS_STATUS_FILE="${DIR_PATH}/mss.status"
 MSS_VALUE_FILE="${DIR_PATH}/mss.value"
@@ -70,7 +73,7 @@ CYAN="\033[36m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
-VERSION="v5.1"
+VERSION="v5.2"
 
 # =========================================================
 # --- [2. 通用工具函数] ---
@@ -532,22 +535,72 @@ generate_whitelist_action() {
     tcp6_ports="${tcp6_ports%,}"; udp6_ports="${udp6_ports%,}"
 
     {
-        echo "        # IPv4 核心防御：白名单与临时访客放行"
+        echo "        # IPv4 核心防御：白名单放行"
         echo "        ip saddr \$ALLOWED_CIDRS accept"
-        echo "        ip saddr @temp_ips accept"
         [ -n "$tcp4_ports" ] && echo "        tcp dport { $tcp4_ports } drop"
         [ -n "$udp4_ports" ] && echo "        udp dport { $udp4_ports } drop"
         [ -z "$tcp4_ports$udp4_ports" ] && echo "        # 当前没有 IPv4 入口转发端口，白名单无生效目标"
     } > "$ACTION_FILE"
 
     {
-        echo "        # IPv6 核心防御：白名单与临时访客放行"
+        echo "        # IPv6 核心防御：白名单放行"
         echo "        ip6 saddr \$ALLOWED_CIDRS6 accept"
-        echo "        ip6 saddr @temp_ips6 accept"
         [ -n "$tcp6_ports" ] && echo "        tcp dport { $tcp6_ports } drop"
         [ -n "$udp6_ports" ] && echo "        udp dport { $udp6_ports } drop"
         [ -z "$tcp6_ports$udp6_ports" ] && echo "        # 当前没有 IPv6 入口转发端口，白名单无生效目标"
     } > "$ACTION6_FILE"
+}
+
+collect_forward_ports() {
+    local tcp4_ports="" udp4_ports="" tcp6_ports="" udp6_ports="" line
+    while IFS= read -r line; do
+        parse_rule "$line" || continue
+        validate_port "$P_LPORT" || continue
+        case "$P_PROTO" in
+            tcp)
+                if [ "$P_LISTEN_FAMILY" = "6" ]; then tcp6_ports+="${P_LPORT},"; else tcp4_ports+="${P_LPORT},"; fi
+                ;;
+            udp)
+                if [ "$P_LISTEN_FAMILY" = "6" ]; then udp6_ports+="${P_LPORT},"; else udp4_ports+="${P_LPORT},"; fi
+                ;;
+            tcp+udp)
+                if [ "$P_LISTEN_FAMILY" = "6" ]; then
+                    tcp6_ports+="${P_LPORT},"; udp6_ports+="${P_LPORT},"
+                else
+                    tcp4_ports+="${P_LPORT},"; udp4_ports+="${P_LPORT},"
+                fi
+                ;;
+        esac
+    done < "$CONFIG_FILE"
+
+    FORWARD_TCP4_PORTS=$(printf '%s' "$tcp4_ports" | tr ',' '\n' | sed '/^$/d' | sort -n -u | paste -sd, -)
+    FORWARD_UDP4_PORTS=$(printf '%s' "$udp4_ports" | tr ',' '\n' | sed '/^$/d' | sort -n -u | paste -sd, -)
+    FORWARD_TCP6_PORTS=$(printf '%s' "$tcp6_ports" | tr ',' '\n' | sed '/^$/d' | sort -n -u | paste -sd, -)
+    FORWARD_UDP6_PORTS=$(printf '%s' "$udp6_ports" | tr ',' '\n' | sed '/^$/d' | sort -n -u | paste -sd, -)
+}
+
+generate_protocol_block_action() {
+    # 全屏蔽模式：不区分目标端口，直接屏蔽所有已配置转发入口端口
+    collect_forward_ports
+    local matched_count=0
+    [ -n "$FORWARD_TCP4_PORTS$FORWARD_UDP4_PORTS" ] && matched_count=$((matched_count + 1))
+    [ -n "$FORWARD_TCP6_PORTS$FORWARD_UDP6_PORTS" ] && matched_count=$((matched_count + 1))
+
+    {
+        echo "        # IPv4 协议屏蔽：全屏蔽已配置的 IPv4 转发入口端口"
+        [ -n "$FORWARD_TCP4_PORTS" ] && echo "        tcp dport { $FORWARD_TCP4_PORTS } drop"
+        [ -n "$FORWARD_UDP4_PORTS" ] && echo "        udp dport { $FORWARD_UDP4_PORTS } drop"
+        [ -z "$FORWARD_TCP4_PORTS$FORWARD_UDP4_PORTS" ] && echo "        # 当前没有 IPv4 入口转发端口，协议屏蔽无生效目标"
+    } > "$PROTO_BLOCK_FILE"
+
+    {
+        echo "        # IPv6 协议屏蔽：全屏蔽已配置的 IPv6 转发入口端口"
+        [ -n "$FORWARD_TCP6_PORTS" ] && echo "        tcp dport { $FORWARD_TCP6_PORTS } drop"
+        [ -n "$FORWARD_UDP6_PORTS" ] && echo "        udp dport { $FORWARD_UDP6_PORTS } drop"
+        [ -z "$FORWARD_TCP6_PORTS$FORWARD_UDP6_PORTS" ] && echo "        # 当前没有 IPv6 入口转发端口，协议屏蔽无生效目标"
+    } > "$PROTO_BLOCK6_FILE"
+
+    log_msg INFO PROTOBLOCK "规则片段已刷新 tcp4=${FORWARD_TCP4_PORTS:-0} udp4=${FORWARD_UDP4_PORTS:-0} tcp6=${FORWARD_TCP6_PORTS:-0} udp6=${FORWARD_UDP6_PORTS:-0} groups=${matched_count}"
 }
 
 list_rules() {
@@ -675,9 +728,11 @@ apply_rules() {
 
     mv "$tmp_rules" "$RULES_FILE"
 
-    local status
+    local status proto_block_status
     status=$(cat "$STATUS_FILE" 2>/dev/null)
     [ "$status" = "ON" ] && generate_whitelist_action
+    proto_block_status=$(cat "$PROTO_BLOCK_STATUS_FILE" 2>/dev/null)
+    [ "$proto_block_status" = "ON" ] && generate_protocol_block_action
 
     local nft_err
     if ! nft_err=$(nft -c -f "$MAIN_CONF" 2>&1); then
@@ -1521,34 +1576,60 @@ toggle_whitelist() {
     sleep 1
 }
 
-view_temp_ips() {
-    echo -e "\n${CYAN}--- ⏳ 临时放行名单 ---${RESET}"
-    local info4 info6
-    info4=$(nft list set ip filter temp_ips 2>/dev/null)
-    info6=$(nft list set ip6 filter temp_ips6 2>/dev/null)
+toggle_protocol_block() {
+    local status old_status old_v4 old_v6 nft_err matched_note
+    status=$(cat "$PROTO_BLOCK_STATUS_FILE" 2>/dev/null)
+    old_status="$status"
+    old_v4=$(cat "$PROTO_BLOCK_FILE" 2>/dev/null)
+    old_v6=$(cat "$PROTO_BLOCK6_FILE" 2>/dev/null)
 
-    echo -e "${CYAN}[IPv4]${RESET}"
-    if [ -z "$info4" ]; then
-        echo -e "${YELLOW}temp_ips 集合不存在${RESET}"
-    elif echo "$info4" | grep -q "elements = { }"; then
-        echo -e "${GREEN}当前无临时放行 IPv4${RESET}"
+    if [ "$status" = "ON" ]; then
+        : > "$PROTO_BLOCK_FILE"
+        : > "$PROTO_BLOCK6_FILE"
+        echo "OFF" > "$PROTO_BLOCK_STATUS_FILE"
+        matched_note="全接收"
     else
-        echo "$info4" | grep "expires" | sed 's/elements = { //g; s/ }//g' | tr ',' '\n' | while read -r line; do
-            [ -n "$line" ] && echo " 🔓 $line"
-        done
+        generate_protocol_block_action
+        echo "ON" > "$PROTO_BLOCK_STATUS_FILE"
+        if ! grep -qvE '^[[:space:]]*(#|$)' "$PROTO_BLOCK_FILE" 2>/dev/null && ! grep -qvE '^[[:space:]]*(#|$)' "$PROTO_BLOCK6_FILE" 2>/dev/null; then
+            matched_note="全屏蔽（当前无命中规则）"
+        else
+            matched_note="全屏蔽"
+        fi
     fi
 
-    echo -e "\n${CYAN}[IPv6]${RESET}"
-    if [ -z "$info6" ]; then
-        echo -e "${YELLOW}temp_ips6 集合不存在${RESET}"
-    elif echo "$info6" | grep -q "elements = { }"; then
-        echo -e "${GREEN}当前无临时放行 IPv6${RESET}"
-    else
-        echo "$info6" | grep "expires" | sed 's/elements = { //g; s/ }//g' | tr ',' '\n' | while read -r line; do
-            [ -n "$line" ] && echo " 🔓 $line"
-        done
+    if ! nft_err=$(nft -c -f "$MAIN_CONF" 2>&1); then
+        printf '%s\n' "$old_v4" > "$PROTO_BLOCK_FILE"
+        printf '%s\n' "$old_v6" > "$PROTO_BLOCK6_FILE"
+        printf '%s\n' "${old_status:-OFF}" > "$PROTO_BLOCK_STATUS_FILE"
+        echo -e "${RED}❌ 协议屏蔽语法检查失败：${RESET}"
+        echo -e "${RED}${nft_err}${RESET}"
+        log_msg ERROR PROTOBLOCK "nft -c 失败: ${nft_err}"
+        echo "按任意键返回..."; read -n 1 -s
+        return 1
     fi
-    echo "按任意键返回..."; read -n 1 -s
+    if ! nft_err=$(nft -f "$MAIN_CONF" 2>&1); then
+        printf '%s\n' "$old_v4" > "$PROTO_BLOCK_FILE"
+        printf '%s\n' "$old_v6" > "$PROTO_BLOCK6_FILE"
+        printf '%s\n' "${old_status:-OFF}" > "$PROTO_BLOCK_STATUS_FILE"
+        echo -e "${RED}❌ 协议屏蔽加载失败：${RESET}"
+        echo -e "${RED}${nft_err}${RESET}"
+        log_msg ERROR PROTOBLOCK "nft -f 失败: ${nft_err}"
+        echo "按任意键返回..."; read -n 1 -s
+        return 1
+    fi
+
+    if [ "$old_status" = "ON" ]; then
+        echo -e "${GREEN}🔓 协议屏蔽已关闭，当前为全接收${RESET}"
+        log_msg INFO PROTOBLOCK "已关闭"
+    elif [[ "$matched_note" == *"无命中规则"* ]]; then
+        echo -e "${YELLOW}🧱 协议屏蔽已开启，但当前没有转发入口端口可屏蔽${RESET}"
+        log_msg WARN PROTOBLOCK "已开启但无转发入口端口"
+    else
+        echo -e "${YELLOW}🧱 协议屏蔽已开启，当前为${matched_note}${RESET}"
+        log_msg INFO PROTOBLOCK "已开启 note=${matched_note}"
+    fi
+    sleep 1
 }
 
 manage_mss() {
@@ -2051,17 +2132,12 @@ ensure_main_conf_v6_realm_support() {
         ip6_block=$(cat << EOF
 
 table ip6 filter {
-    # IPv6 动态访客集合（含超时）
-    set temp_ips6 {
-        type ipv6_addr
-        flags timeout
-    }
-
     # 【IPv6 防御层】精准转发拦截
     chain prerouting_filter {
         type filter hook prerouting priority -150; policy accept;
         ct state established,related accept
         meta l4proto ipv6-icmp accept
+        include "$PROTO_BLOCK6_FILE"
         include "$ACTION6_FILE"
     }
 
@@ -2070,6 +2146,7 @@ table ip6 filter {
         ct state established,related accept
         iifname "lo" accept
         meta l4proto ipv6-icmp accept
+        include "$PROTO_BLOCK6_FILE"
 
         # IPv6 input 默认放行，白名单只在 prerouting 精准拦截转发/realm 入口端口
         include "$REALM_INPUT6_FILE"
@@ -2109,6 +2186,9 @@ init_env() {
     [ ! -f "$STATUS_FILE" ] && echo "OFF" > "$STATUS_FILE"
     [ ! -f "$ACTION_FILE" ] && touch "$ACTION_FILE"
     [ ! -f "$ACTION6_FILE" ] && touch "$ACTION6_FILE"
+    [ ! -f "$PROTO_BLOCK_STATUS_FILE" ] && echo "OFF" > "$PROTO_BLOCK_STATUS_FILE"
+    [ ! -f "$PROTO_BLOCK_FILE" ] && touch "$PROTO_BLOCK_FILE"
+    [ ! -f "$PROTO_BLOCK6_FILE" ] && touch "$PROTO_BLOCK6_FILE"
     [ ! -f "$REALM_INPUT_FILE" ] && echo "        # 当前没有 IPv4 realm 监听端口" > "$REALM_INPUT_FILE"
     [ ! -f "$REALM_INPUT6_FILE" ] && echo "        # 当前没有 IPv6 realm 监听端口" > "$REALM_INPUT6_FILE"
     [ ! -f "$MSS_STATUS_FILE" ] && echo "OFF" > "$MSS_STATUS_FILE"
@@ -2193,17 +2273,12 @@ include "$WHITELIST_DEF"
 include "$WHITELIST6_DEF"
 
 table ip filter {
-    # 动态访客集合（含超时）
-    set temp_ips {
-        type ipv4_addr
-        flags timeout
-    }
-
     # 【防御层】精准转发拦截
     chain prerouting_filter {
         type filter hook prerouting priority -150; policy accept;
         ct state established,related accept
         tcp dport $ssh_port accept
+        include "$PROTO_BLOCK_FILE"
         include "$ACTION_FILE"
     }
 
@@ -2213,6 +2288,7 @@ table ip filter {
         iifname "lo" accept
         ip protocol icmp accept
         tcp dport $ssh_port accept
+        include "$PROTO_BLOCK_FILE"
 
         # 本地业务端口（不受白名单影响，按需修改）
         tcp dport { 80, 443, 2053, 2083, 8443 } accept
@@ -2232,17 +2308,12 @@ table ip filter {
 }
 
 table ip6 filter {
-    # IPv6 动态访客集合（含超时）
-    set temp_ips6 {
-        type ipv6_addr
-        flags timeout
-    }
-
     # 【IPv6 防御层】精准转发拦截
     chain prerouting_filter {
         type filter hook prerouting priority -150; policy accept;
         ct state established,related accept
         meta l4proto ipv6-icmp accept
+        include "$PROTO_BLOCK6_FILE"
         include "$ACTION6_FILE"
     }
 
@@ -2251,6 +2322,7 @@ table ip6 filter {
         ct state established,related accept
         iifname "lo" accept
         meta l4proto ipv6-icmp accept
+        include "$PROTO_BLOCK6_FILE"
 
         # IPv6 input 默认放行，白名单只在 prerouting 精准拦截转发/realm 入口端口
         include "$REALM_INPUT6_FILE"
@@ -2280,8 +2352,9 @@ EOF
         ensure_main_conf_v6_realm_support
     fi
 
-    # 根据 dynamic / realm / 白名单状态同步后台服务和规则片段
+    # 根据 dynamic / realm / 白名单 / 协议屏蔽状态同步后台服务和规则片段
     [ "$(cat "$STATUS_FILE" 2>/dev/null)" = "ON" ] && generate_whitelist_action
+    [ "$(cat "$PROTO_BLOCK_STATUS_FILE" 2>/dev/null)" = "ON" ] && generate_protocol_block_action
     sync_resolver_state
     sync_realm_state >/dev/null 2>&1 || true
 }
@@ -2321,21 +2394,23 @@ forward_submenu() {
 defense_submenu() {
     while true; do
         clear
-        local status_wl
+        local status_wl status_proto
         status_wl=$(cat "$STATUS_FILE" 2>/dev/null)
+        status_proto=$(cat "$PROTO_BLOCK_STATUS_FILE" 2>/dev/null)
         echo -e "${CYAN}═══ 防御白名单管理 ═══${RESET}"
         echo
-        echo -e "  作用：开启后，${BOLD}非白名单 IP 访问转发端口直接 drop${RESET}，本机业务端口（80/443/SSH 等）不受影响。"
+        echo -e "  白名单：开启后，${BOLD}非白名单 IP 访问转发端口直接 drop${RESET}，本机业务端口（80/443/SSH 等）不受影响。"
+        echo -e "  协议屏蔽：用于一键封禁 HTTP/TLS/SOCKS 等转发入口；当前实现为已配置转发入口统一 drop，关闭后恢复全接收。"
         echo
         echo -e "  ${CYAN}1)${RESET} 编辑 CIDR 白名单 (允许访问转发端口的 IP 段)"
         echo -e "  ${CYAN}2)${RESET} 白名单拦截开关  [当前: $([ "$status_wl" = "ON" ] && echo -e "${GREEN}开启${RESET}" || echo -e "${RED}关闭${RESET}")]"
-        echo -e "  ${CYAN}3)${RESET} 查看临时放行 IP 名单"
+        echo -e "  ${CYAN}3)${RESET} 转发协议屏蔽（HTTP/TLS/SOCKS） [当前: $([ "$status_proto" = "ON" ] && echo -e "${RED}全屏蔽${RESET}" || echo -e "${GREEN}全接收${RESET}")]"
         echo -e "  ${CYAN}0)${RESET} 返回主菜单"
         read -p "请选择: " c
         case "$c" in
             1) edit_whitelist ;;
             2) toggle_whitelist ;;
-            3) view_temp_ips ;;
+            3) toggle_protocol_block ;;
             0) return ;;
         esac
     done

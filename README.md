@@ -13,6 +13,7 @@ NF-Manager 面向 Linux VPS 的端口转发、DDNS 跟随、白名单拦截和�
 - IPv4 ↔ IPv6 跨协议族转发（可选 realm）
 - 域名转发：静态解析 / 动态 DDNS
 - IPv4 / IPv6 白名单拦截
+- 转发入口协议屏蔽开关（全屏蔽 / 全接收）
 - 规则备注、编辑、批量添加、导入导出
 - DDNS resolver 自动跟随解析变化
 - MTU / MSS 调优
@@ -70,6 +71,9 @@ nf --help              # 帮助
 ├── rules.nft                          自动生成的 nftables NAT 规则
 ├── whitelist_action.nft               IPv4 白名单拦截片段
 ├── whitelist_action6.nft              IPv6 白名单拦截片段
+├── proto_block.nft                    IPv4 转发入口全屏蔽片段
+├── proto_block6.nft                   IPv6 转发入口全屏蔽片段
+├── proto_block.status                 协议屏蔽状态（ON/OFF）
 ├── realm_input.nft                    IPv4 realm 监听端口 input 放行片段
 ├── realm_input6.nft                   IPv6 realm 监听端口 input 放行片段
 ├── resolver.cache                     DDNS 解析缓存（A/AAAA 分协议族）
@@ -112,6 +116,7 @@ nf --help              # 帮助
 - 完全卸载（`99`）会清理所有数据，备份目录 `/etc/nf_manager/backups/` 也会一并删除，请在卸载前手动留存所需文件
 - 添加 dynamic 域名规则时会自动启动 systemd timer，删除最后一条 dynamic 规则时自动停止
 - 白名单拦截开启后，非白名单 IPv4/IPv6 无法访问对应协议族入口的转发端口，但本机业务端口（80/443/SSH 等）不受影响
+- 协议屏蔽开启后，会直接 drop 所有已配置转发入口端口；关闭后恢复全接收。屏蔽范围按当前转发规则动态生成，分别覆盖 IPv4/TCP、IPv4/UDP、IPv6/TCP、IPv6/UDP。它不做深度 DPI / SNI 解析
 
 ---
 
