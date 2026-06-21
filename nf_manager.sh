@@ -200,6 +200,193 @@ validate_port() {
     [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+# 校验：单端口或端口段（如 35681-35690）
+validate_port_item() {
+    local item="$1" start end
+    if [[ "$item" =~ ^[0-9]+$ ]]; then
+        validate_port "$item"
+        return $?
+    fi
+    if [[ "$item" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        start="${BASH_REMATCH[1]}"
+        end="${BASH_REMATCH[2]}"
+        validate_port "$start" && validate_port "$end" && [ "$start" -le "$end" ]
+        return $?
+    fi
+    return 1
+}
+
+port_item_interval() {
+    local item="$1" start end
+    validate_port_item "$item" || return 1
+    if [[ "$item" =~ ^[0-9]+$ ]]; then
+        printf '%s %s\n' "$item" "$item"
+        return 0
+    fi
+    if [[ "$item" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        start="${BASH_REMATCH[1]}"
+        end="${BASH_REMATCH[2]}"
+        printf '%s %s\n' "$start" "$end"
+        return 0
+    fi
+    return 1
+}
+
+normalize_port_items() {
+    local raw="$*" item intervals
+    raw="${raw//\{/ }"
+    raw="${raw//\}/ }"
+    raw="${raw//,/ }"
+    intervals=$(for item in $raw; do
+        port_item_interval "$item" || true
+    done | sort -n -k1,1 -k2,2)
+
+    [ -n "$intervals" ] || return 0
+    awk '
+        function print_range(s, e) {
+            if (out != "") out = out ", "
+            out = out (s == e ? s : s "-" e)
+        }
+        NR == 1 { start=$1; end=$2; next }
+        $1 <= end {
+            if ($2 > end) end=$2
+            next
+        }
+        {
+            print_range(start, end)
+            start=$1; end=$2
+        }
+        END {
+            if (NR > 0) {
+                print_range(start, end)
+                print out
+            }
+        }
+    ' <<< "$intervals"
+}
+
+extract_existing_input_accept_ports() {
+    EXISTING_INPUT_TCP_PORTS=""
+    EXISTING_INPUT_UDP_PORTS=""
+    EXISTING_INPUT_SKIPPED_RULES=0
+    [ -f "$MAIN_CONF" ] || return 0
+
+    local proto spec
+    while IFS='|' read -r proto spec; do
+        case "$proto" in
+            tcp) EXISTING_INPUT_TCP_PORTS+=" $spec" ;;
+            udp) EXISTING_INPUT_UDP_PORTS+=" $spec" ;;
+            SKIP) EXISTING_INPUT_SKIPPED_RULES=$((EXISTING_INPUT_SKIPPED_RULES + 1)) ;;
+        esac
+    done < <(awk '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        function brace_delta(s, i, c, d) {
+            d=0
+            for (i=1; i<=length(s); i++) {
+                c=substr(s, i, 1)
+                if (c == "{") d++
+                else if (c == "}") d--
+            }
+            return d
+        }
+        function emit_rule(raw, line, proto, spec, bad) {
+            if (line !~ /^(tcp|udp)[[:space:]]+dport[[:space:]]+/ || line !~ /(^|[[:space:]])accept([[:space:]]|$)/) {
+                if (line ~ /dport/ && line ~ /(^|[[:space:]])accept([[:space:]]|$)/) print "SKIP|" raw
+                return
+            }
+            proto=line
+            sub(/[[:space:]]+dport.*/, "", proto)
+            spec=line
+            sub(/^(tcp|udp)[[:space:]]+dport[[:space:]]+/, "", spec)
+            sub(/[[:space:]]+counter([[:space:]]+packets[[:space:]]+[0-9]+[[:space:]]+bytes[[:space:]]+[0-9]+)?[[:space:]]+accept.*$/, "", spec)
+            sub(/[[:space:]]+accept.*$/, "", spec)
+            bad=spec
+            gsub(/[{}0-9,[:space:]-]/, "", bad)
+            if (bad == "") print proto "|" spec
+            else print "SKIP|" raw
+        }
+        {
+            raw=$0
+            line=raw
+            sub(/#.*/, "", line)
+            line=trim(line)
+            if (line == "") next
+
+            if (!in_table) {
+                if (line ~ /^table[[:space:]]+(ip|inet)[[:space:]]+/) {
+                    in_table=1
+                    table_depth=brace_delta(line)
+                } else if (line ~ /^table[[:space:]]+/) {
+                    in_table=2
+                    table_depth=brace_delta(line)
+                }
+                next
+            }
+
+            if (in_table == 2) {
+                table_depth += brace_delta(line)
+                if (table_depth <= 0) in_table=0
+                next
+            }
+
+            if (!in_input && line ~ /^chain[[:space:]]+input[[:space:]]*\{/) {
+                in_input=1
+                input_depth=brace_delta(line)
+                table_depth += brace_delta(line)
+                next
+            }
+
+            if (in_input) {
+                emit_rule(raw, line)
+                input_depth += brace_delta(line)
+                table_depth += brace_delta(line)
+                if (input_depth <= 0) in_input=0
+                if (table_depth <= 0) in_table=0
+                next
+            }
+
+            table_depth += brace_delta(line)
+            if (table_depth <= 0) in_table=0
+        }
+    ' "$MAIN_CONF")
+}
+
+format_port_accept_lines() {
+    local proto="$1" ports="$2" singles="" ranges="" item
+    for item in ${ports//,/ }; do
+        [ -z "$item" ] && continue
+        if [[ "$item" == *-* ]]; then
+            ranges+=" $item"
+        else
+            singles+=" $item"
+        fi
+    done
+
+    if [ -n "$singles" ]; then
+        singles=$(normalize_port_items "$singles")
+        [ -n "$singles" ] && printf '        %s dport { %s } accept\n' "$proto" "$singles"
+    fi
+    for item in $ranges; do
+        printf '        %s dport %s accept\n' "$proto" "$item"
+    done
+}
+
+build_local_business_port_block() {
+    local tcp_ports udp_ports tcp_lines udp_lines
+    tcp_ports=$(normalize_port_items "$EXISTING_INPUT_TCP_PORTS 80 443 2053 2083 8443 35782 42755 51294 35681-35690")
+    udp_ports=$(normalize_port_items "$EXISTING_INPUT_UDP_PORTS 2053 2083 8443 35681-35690")
+    LOCAL_BUSINESS_PORT_BLOCK=""
+    if [ -n "$tcp_ports" ]; then
+        tcp_lines=$(format_port_accept_lines tcp "$tcp_ports")
+        [ -n "$tcp_lines" ] && LOCAL_BUSINESS_PORT_BLOCK+="$tcp_lines"$'\n'
+    fi
+    if [ -n "$udp_ports" ]; then
+        udp_lines=$(format_port_accept_lines udp "$udp_ports")
+        [ -n "$udp_lines" ] && LOCAL_BUSINESS_PORT_BLOCK+="$udp_lines"$'\n'
+    fi
+    LOCAL_BUSINESS_PORT_BLOCK="${LOCAL_BUSINESS_PORT_BLOCK%$'\n'}"
+}
+
 # 校验：IPv4 点分十进制
 validate_ipv4() {
     [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -2114,13 +2301,35 @@ ensure_main_conf_v6_realm_support() {
         [ "$changed" = "0" ] && backup_file "$MAIN_CONF"
         tmp=$(mktemp)
         awk -v inc="        include \"$REALM_INPUT_FILE\"" '
-            {print}
-            /tcp dport \{ 80, 443, 2053, 2083, 8443 \} accept/ && !done {
-                print ""
-                print "        # IPv4 realm 跨协议族用户态转发监听端口"
-                print inc
-                done=1
+            function brace_delta(s, i, c, d) {
+                d=0
+                for (i=1; i<=length(s); i++) {
+                    c=substr(s, i, 1)
+                    if (c == "{") d++
+                    else if (c == "}") d--
+                }
+                return d
             }
+            function print_realm_include() {
+                if (!done) {
+                    print ""
+                    print "        # realm 跨 IPv4/IPv6 用户态转发监听端口"
+                    print inc
+                    done=1
+                }
+            }
+            /^[[:space:]]*chain[[:space:]]+input[[:space:]]*\{/ { in_input=1; depth=brace_delta($0); print; next }
+            in_input && /# 本地业务端口/ { in_local=1; print; next }
+            in_input && in_local && /^[[:space:]]*(tcp|udp)[[:space:]]+dport[[:space:]]+.*[[:space:]]+accept/ { print; next }
+            in_input && in_local { print_realm_include(); in_local=0 }
+            in_input {
+                depth += brace_delta($0)
+                if (depth <= 0) {
+                    print_realm_include()
+                    in_input=0
+                }
+            }
+            {print}
         ' "$MAIN_CONF" > "$tmp" && mv "$tmp" "$MAIN_CONF"
         changed=1
     fi
@@ -2263,6 +2472,13 @@ EOF
             install_realm || echo -e "${YELLOW}realm 安装失败，基础 nftables 转发仍可继续使用。${RESET}"
         fi
 
+        extract_existing_input_accept_ports
+        build_local_business_port_block
+        if [ "$EXISTING_INPUT_SKIPPED_RULES" -gt 0 ]; then
+            echo -e "${YELLOW}⚠️  检测到 ${EXISTING_INPUT_SKIPPED_RULES} 条复杂 input accept 规则未自动合并，请根据备份手动确认本地业务端口。${RESET}"
+            log_msg WARN INIT "复杂 input accept 规则未自动合并 count=${EXISTING_INPUT_SKIPPED_RULES}"
+        fi
+
         backup_file "$MAIN_CONF"
         cat > "$MAIN_CONF" << EOF
 #!/usr/sbin/nft -f
@@ -2291,7 +2507,7 @@ table ip filter {
         include "$PROTO_BLOCK_FILE"
 
         # 本地业务端口（不受白名单影响，按需修改）
-        tcp dport { 80, 443, 2053, 2083, 8443 } accept
+$LOCAL_BUSINESS_PORT_BLOCK
 
         # realm 跨 IPv4/IPv6 用户态转发监听端口
         include "$REALM_INPUT_FILE"
